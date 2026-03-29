@@ -11,9 +11,12 @@ const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-// ---- Basic health check ----
+// ---- Serve static files ----
+app.use(express.static("public"));
+
+// ---- Root route ----
 app.get("/", (req, res) => {
-  res.send("Realtime Voice AI Server is running");
+  res.sendFile(new URL("./public/index.html", import.meta.url).pathname);
 });
 
 // ---- WebSocket Server ----
