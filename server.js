@@ -10,6 +10,8 @@ const server = http.createServer(app);
 
 const PORT = process.env.PORT || 3000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const REALTIME_MODEL = process.env.REALTIME_MODEL || "gpt-4o-realtime-preview";
+const VOICE_NAME = process.env.VOICE_NAME || "alloy";
 
 // ---- Serve static files ----
 app.use(express.static("public"));
@@ -46,7 +48,7 @@ wss.on("connection", async (clientWs) => {
 
   // ---- Connect to OpenAI Realtime ----
   function connectUpstream() {
-    const url = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview";
+    const url = `wss://api.openai.com/v1/realtime?model=${REALTIME_MODEL}`;
 
     upstreamWs = new WebSocket(url, {
       headers: {
@@ -64,7 +66,16 @@ wss.on("connection", async (clientWs) => {
         type: "session.update",
         session: {
           instructions: DEFAULT_INSTRUCTIONS,
-          modalities: ["audio", "text"]
+          modalities: ["audio", "text"],
+          voice: VOICE_NAME,
+          input_audio_format: "pcm16",
+          output_audio_format: "pcm16",
+          input_audio_transcription: {
+            model: "gpt-4o-mini-transcribe"
+          },
+          turn_detection: {
+            type: "server_vad"
+          }
         }
       }));
 
@@ -74,14 +85,22 @@ wss.on("connection", async (clientWs) => {
     });
 
     upstreamWs.on("message", (data) => {
-      const msg = JSON.parse(data.toString());
+      let msg;
+
+      try {
+        msg = JSON.parse(data.toString());
+      } catch (err) {
+        console.error("[upstream] failed to parse message:", err.message);
+        return;
+      }
 
       // Forward everything back to client
       safeSend(clientWs, msg);
     });
 
-    upstreamWs.on("close", () => {
-      console.log("[upstream] disconnected");
+    upstreamWs.on("close", (code, reasonBuffer) => {
+      const reason = reasonBuffer?.toString?.() || "";
+      console.log(`[upstream] disconnected ${code}${reason ? ` ${reason}` : ""}`);
     });
 
     upstreamWs.on("error", (err) => {
@@ -96,6 +115,15 @@ wss.on("connection", async (clientWs) => {
     if (!upstreamWs) return;
 
     const message = data.toString();
+
+    try {
+      const parsed = JSON.parse(message);
+      if (parsed?.type) {
+        console.log(`[relay] client -> upstream: ${parsed.type}`);
+      }
+    } catch {
+      console.log("[relay] client -> upstream: non-json message");
+    }
 
     // If upstream not ready yet → queue
     if (!upstreamReady) {

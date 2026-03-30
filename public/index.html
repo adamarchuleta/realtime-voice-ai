@@ -330,6 +330,7 @@
       <div class="controls">
         <button class="primary" id="connectBtn">Connect</button>
         <button class="secondary" id="disconnectBtn">Disconnect</button>
+        <button class="secondary" id="micBtn">Start Mic</button>
         <button class="ghost" id="clearBtn">Clear Transcript</button>
       </div>
     </section>
@@ -351,6 +352,9 @@
         />
         <button class="primary" id="sendBtn">Send</button>
       </div>
+      <div class="mini-copy" id="audioHint" style="margin-top: 10px;">
+        Voice mode uses your microphone to stream PCM audio to the realtime session and plays assistant audio responses locally.
+      </div>
 
       <details>
         <summary>Realtime event log</summary>
@@ -367,11 +371,198 @@
     const statusDetail = document.getElementById("statusDetail");
     const connectBtn = document.getElementById("connectBtn");
     const disconnectBtn = document.getElementById("disconnectBtn");
+    const micBtn = document.getElementById("micBtn");
     const clearBtn = document.getElementById("clearBtn");
     const sendBtn = document.getElementById("sendBtn");
     const messageInput = document.getElementById("messageInput");
     const transcript = document.getElementById("transcript");
     const eventLog = document.getElementById("eventLog");
+
+    let audioContext = null;
+    let inputStream = null;
+    let inputSource = null;
+    let processorNode = null;
+    let isMicActive = false;
+    let playbackTime = 0;
+
+    function arrayBufferToBase64(buffer) {
+      let binary = "";
+      const bytes = new Uint8Array(buffer);
+      const chunkSize = 0x8000;
+
+      for (let i = 0; i < bytes.length; i += chunkSize) {
+        const chunk = bytes.subarray(i, i + chunkSize);
+        binary += String.fromCharCode(...chunk);
+      }
+
+      return btoa(binary);
+    }
+
+    function floatTo16BitPCM(float32Array) {
+      const output = new Int16Array(float32Array.length);
+
+      for (let i = 0; i < float32Array.length; i += 1) {
+        const s = Math.max(-1, Math.min(1, float32Array[i]));
+        output[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+      }
+
+      return output;
+    }
+
+    function downsampleBuffer(float32Array, inputSampleRate, outputSampleRate) {
+      if (outputSampleRate >= inputSampleRate) {
+        return float32Array;
+      }
+
+      const sampleRateRatio = inputSampleRate / outputSampleRate;
+      const newLength = Math.round(float32Array.length / sampleRateRatio);
+      const result = new Float32Array(newLength);
+      let offsetResult = 0;
+      let offsetBuffer = 0;
+
+      while (offsetResult < result.length) {
+        const nextOffsetBuffer = Math.round((offsetResult + 1) * sampleRateRatio);
+        let accum = 0;
+        let count = 0;
+
+        for (let i = offsetBuffer; i < nextOffsetBuffer && i < float32Array.length; i += 1) {
+          accum += float32Array[i];
+          count += 1;
+        }
+
+        result[offsetResult] = count > 0 ? accum / count : 0;
+        offsetResult += 1;
+        offsetBuffer = nextOffsetBuffer;
+      }
+
+      return result;
+    }
+
+    async function ensureAudioContext() {
+      if (!audioContext) {
+        audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+      }
+
+      if (audioContext.state === "suspended") {
+        await audioContext.resume();
+      }
+
+      if (!playbackTime || playbackTime < audioContext.currentTime) {
+        playbackTime = audioContext.currentTime;
+      }
+    }
+
+    function schedulePcm16Playback(base64Audio) {
+      if (!audioContext) return;
+
+      const binary = atob(base64Audio);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+
+      const int16 = new Int16Array(bytes.buffer);
+      const audioBuffer = audioContext.createBuffer(1, int16.length, 24000);
+      const channelData = audioBuffer.getChannelData(0);
+
+      for (let i = 0; i < int16.length; i += 1) {
+        channelData[i] = int16[i] / 0x8000;
+      }
+
+      const source = audioContext.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(audioContext.destination);
+
+      const startAt = Math.max(playbackTime, audioContext.currentTime);
+      source.start(startAt);
+      playbackTime = startAt + audioBuffer.duration;
+    }
+
+    async function startMicrophone() {
+      if (isMicActive) return;
+
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
+        setStatus("Disconnected", "Connect first before starting the microphone.");
+        appendEventLog("[client] mic blocked: socket is not connected");
+        return;
+      }
+
+      await ensureAudioContext();
+
+      inputStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true
+        }
+      });
+
+      inputSource = audioContext.createMediaStreamSource(inputStream);
+      processorNode = audioContext.createScriptProcessor(4096, 1, 1);
+
+      processorNode.onaudioprocess = (event) => {
+        if (!socket || socket.readyState !== WebSocket.OPEN || !isMicActive) {
+          return;
+        }
+
+        const inputData = event.inputBuffer.getChannelData(0);
+        const downsampled = downsampleBuffer(inputData, audioContext.sampleRate, 24000);
+        const pcm16 = floatTo16BitPCM(downsampled);
+        const base64Audio = arrayBufferToBase64(pcm16.buffer);
+
+        socket.send(JSON.stringify({
+          type: "input_audio_buffer.append",
+          audio: base64Audio
+        }));
+      };
+
+      inputSource.connect(processorNode);
+      processorNode.connect(audioContext.destination);
+
+      isMicActive = true;
+      micBtn.textContent = "Stop Mic";
+      setStatus("Listening", "Microphone active. Speak naturally, then stop the mic to send audio.");
+      appendEventLog("[client] microphone started");
+    }
+
+    function stopMicrophone(sendCommit = true) {
+      if (!isMicActive && !inputStream && !processorNode) {
+        return;
+      }
+
+      isMicActive = false;
+
+      if (processorNode) {
+        processorNode.disconnect();
+        processorNode.onaudioprocess = null;
+        processorNode = null;
+      }
+
+      if (inputSource) {
+        inputSource.disconnect();
+        inputSource = null;
+      }
+
+      if (inputStream) {
+        inputStream.getTracks().forEach(track => track.stop());
+        inputStream = null;
+      }
+
+      micBtn.textContent = "Start Mic";
+      appendEventLog("[client] microphone stopped");
+
+      if (sendCommit && socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+        socket.send(JSON.stringify({
+          type: "response.create",
+          response: {
+            modalities: ["audio", "text"]
+          }
+        }));
+        setStatus("Thinking", "Audio committed. Waiting for assistant response...");
+      }
+    }
 
     function setStatus(label, detail) {
       statusText.textContent = label;
@@ -448,6 +639,8 @@
     }
 
     function disconnectSocket() {
+      stopMicrophone(false);
+
       if (socket) {
         socket.close();
       }
@@ -468,6 +661,7 @@
       messageInput.value = "";
       setStatus("Thinking", "Message sent. Waiting for realtime response...");
       resetAssistantBuffer();
+      playbackTime = 0;
 
       socket.send(JSON.stringify({
         type: "conversation.item.create",
@@ -493,6 +687,7 @@
           break;
 
         case "response.output_text.delta":
+        case "response.text.delta":
           if (!assistantBubbleEl) {
             assistantBubbleEl = appendBubble("assistant", "");
           }
@@ -504,6 +699,7 @@
           break;
 
         case "response.output_text.done":
+        case "response.text.done":
           if (typeof event.text === "string" && event.text.trim()) {
             assistantBuffer = event.text;
             if (!assistantBubbleEl) {
@@ -512,6 +708,17 @@
               assistantBubbleEl.textContent = assistantBuffer;
             }
           }
+          setStatus("Connected", "Realtime session active. Send another message anytime.");
+          break;
+
+        case "response.audio.delta":
+          ensureAudioContext()
+            .then(() => schedulePcm16Playback(event.delta))
+            .catch((error) => appendEventLog(`[audio] playback error: ${error.message}`));
+          setStatus("Speaking", "Playing assistant audio response...");
+          break;
+
+        case "response.audio.done":
           setStatus("Connected", "Realtime session active. Send another message anytime.");
           break;
 
@@ -532,6 +739,21 @@
     connectBtn.addEventListener("click", connectSocket);
     disconnectBtn.addEventListener("click", disconnectSocket);
 
+    micBtn.addEventListener("click", async () => {
+      try {
+        if (isMicActive) {
+          stopMicrophone(true);
+        } else {
+          playbackTime = 0;
+          await startMicrophone();
+        }
+      } catch (error) {
+        setStatus("Error", error.message || "Could not start microphone.");
+        appendEventLog(`[client] microphone error: ${error.message}`);
+        stopMicrophone(false);
+      }
+    });
+
     clearBtn.addEventListener("click", () => {
       transcript.innerHTML = `
         <div class="bubble assistant">
@@ -540,6 +762,7 @@
       `;
       eventLog.textContent = "No events yet.";
       resetAssistantBuffer();
+      playbackTime = 0;
       setStatus("Disconnected", "Connect to start a live session and stream realtime events.");
     });
 
