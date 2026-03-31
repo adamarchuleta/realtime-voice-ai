@@ -2,4 +2,14 @@ node_modules
 .env
 venv/
 __pycache__/
-*.pyc
+*.pyc 
+# Runtime files
+*.log
+*.pid
+
+# Python
+__pycache__/
+venv/
+
+# Node
+node_modules/
