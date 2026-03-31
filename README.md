@@ -1,31 +1,34 @@
-
-
 # Realtime Voice AI Starter
 
-Production-style starter for building low-latency voice AI apps using WebSockets and the OpenAI Realtime API.
+A minimal, production-style backend for building real-time voice AI systems using WebSockets and the OpenAI Realtime API.
 ---
+## Full System Setup
 
-## Overview
+This project is part of a modular AI system:
 
-This project is a minimal, production-style backend for building real-time voice AI applications.
+- realtime-voice-ai (interface)
+- ai-agent-core (decision layer)
+- ai-memory-backend (memory)
 
-It acts as a relay between a client (browser, mobile app, etc.) and the OpenAI Realtime API — enabling:
+### Run all services
 
-- Streaming audio input
--  Instant AI responses
-- Bidirectional real-time communication
+1. Start memory backend (port 8000)
+2. Start agent core (port 8001)
+3. Start voice server (port 3000)
 
----
+### Flow
 
-# Why this exists
+User → Voice → Agent → Memory → Response
+
+This repository focuses on the interface layer of the system, handling real-time voice input and output.
+
+## Why This Exists
 
 Most AI examples today are text-based and request/response driven.
 
 This project shows how to build a true real-time voice system, similar to modern AI assistants — where users can speak naturally and receive immediate responses.
 
----
-
-# Architecture
+## Architecture
 
 ```
 Client (Mic / UI)
@@ -39,29 +42,27 @@ OpenAI Realtime API
 Streaming responses back to client
 ```
 
----
+## Features
 
-# Features
-
-- 🎤Real-time audio + text streaming
-- Low-latency AI responses
-- WebSocket-based architecture
-- Upstream message queueing (handles connection timing)
--  Simple and extensible backend structure
-- Minimal setup — easy to run locally
+- Real-time audio and text streaming  
+- Low-latency AI responses  
+- WebSocket-based architecture  
+- Upstream message queueing (handles connection timing)  
+- Simple and extensible backend structure  
+- Minimal setup for local development  
 
 ---
 
 # Setup
 
-# 1. Clone the repo
+### 1. Clone the repo
 
 ```bash
 git clone https://github.com/your-username/realtime-voice-ai.git
 cd realtime-voice-ai
 ```
 
-# 2. Install dependencies
+### 2. Install dependencies
 
 ```bash
 npm install
@@ -84,7 +85,7 @@ PORT=3000
 
 ---
 
-# Run the server
+## Run the Server
 
 ```bash
 npm start
@@ -98,7 +99,7 @@ Server running on http://localhost:3000
 
 ---
 
-# WebSocket Endpoint
+## WebSocket Endpoint
 
 ```
 ws://localhost:3000/realtime
@@ -108,7 +109,7 @@ Connect your client to this endpoint and send OpenAI Realtime-compatible events.
 
 ---
 
-## 🧪 Example Use Cases
+## Use Cases
 
 - Voice assistants
 - AI interview simulators

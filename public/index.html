@@ -366,6 +366,7 @@
     let socket = null;
     let assistantBuffer = "";
     let assistantBubbleEl = null;
+    let lastTranscriptBubbleEl = null;
 
     const statusText = document.getElementById("statusText");
     const statusDetail = document.getElementById("statusDetail");
@@ -590,9 +591,21 @@
       return bubble;
     }
 
+    function upsertTranscriptBubble(text) {
+      if (!text) return;
+
+      if (!lastTranscriptBubbleEl) {
+        lastTranscriptBubbleEl = appendBubble("user", text);
+      } else {
+        lastTranscriptBubbleEl.textContent = text;
+        transcript.scrollTop = transcript.scrollHeight;
+      }
+    }
+
     function resetAssistantBuffer() {
       assistantBuffer = "";
       assistantBubbleEl = null;
+      lastTranscriptBubbleEl = null;
     }
 
     function connectSocket() {
@@ -676,8 +689,6 @@
           ]
         }
       }));
-
-      socket.send(JSON.stringify({ type: "response.create" }));
     }
 
     function handleRealtimeEvent(event) {
@@ -720,6 +731,48 @@
 
         case "response.audio.done":
           setStatus("Connected", "Realtime session active. Send another message anytime.");
+          break;
+
+        case "conversation.item.input_audio_transcription.completed":
+          if (event.transcript?.trim()) {
+            upsertTranscriptBubble(event.transcript.trim());
+            setStatus("Thinking", "Transcript captured. Routing through the agent...");
+          }
+          break;
+
+        case "agent.transcript":
+          if (event.transcript?.trim()) {
+            upsertTranscriptBubble(event.transcript.trim());
+            setStatus("Thinking", "Transcript captured. Routing through the agent...");
+          }
+          break;
+
+        case "agent.response": {
+          const reply = event.reply?.trim();
+
+          resetAssistantBuffer();
+          playbackTime = 0;
+
+          if (reply) {
+            assistantBubbleEl = appendBubble("assistant", reply);
+          }
+
+          if (reply && socket && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({
+              type: "response.create",
+              response: {
+                modalities: ["audio"],
+                instructions: `Speak this exact reply to the user: ${JSON.stringify(reply)}`
+              }
+            }));
+          }
+
+          setStatus("Speaking", "Agent response ready. Playing assistant voice...");
+          break;
+        }
+
+        case "agent.error":
+          setStatus("Error", event.error || "Agent request failed.");
           break;
 
         case "response.done":

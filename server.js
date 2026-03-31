@@ -12,6 +12,7 @@ const PORT = process.env.PORT || 3000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const REALTIME_MODEL = process.env.REALTIME_MODEL || "gpt-4o-realtime-preview";
 const VOICE_NAME = process.env.VOICE_NAME || "alloy";
+const AGENT_API_BASE = process.env.AGENT_API_BASE || "http://127.0.0.1:8001";
 
 // ---- Serve static files ----
 app.use(express.static("public"));
@@ -38,6 +39,27 @@ function safeSend(ws, data) {
   }
 }
 
+async function callAgent({ userId, message, topic }) {
+  const response = await fetch(`${AGENT_API_BASE}/agent/respond`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      user_id: userId,
+      message,
+      topic
+    })
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Agent request failed (${response.status}): ${errorText}`);
+  }
+
+  return response.json();
+}
+
 // ---- WebSocket Connection ----
 wss.on("connection", async (clientWs) => {
   console.log("[client] connected");
@@ -45,6 +67,7 @@ wss.on("connection", async (clientWs) => {
   let upstreamWs = null;
   let upstreamReady = false;
   let upstreamQueue = [];
+  const userId = "demo-user";
 
   // ---- Connect to OpenAI Realtime ----
   function connectUpstream() {
@@ -94,6 +117,39 @@ wss.on("connection", async (clientWs) => {
         return;
       }
 
+      if (msg?.type === "conversation.item.input_audio_transcription.completed") {
+        const transcript = msg.transcript?.trim();
+
+        if (transcript) {
+          console.log(`[agent] transcript ready: ${transcript}`);
+          safeSend(clientWs, {
+            type: "agent.transcript",
+            transcript
+          });
+
+          callAgent({
+            userId,
+            message: transcript,
+            topic: "voice"
+          })
+            .then((agentResult) => {
+              safeSend(clientWs, {
+                type: "agent.response",
+                transcript,
+                ...agentResult
+              });
+            })
+            .catch((error) => {
+              console.error("[agent] error:", error.message);
+              safeSend(clientWs, {
+                type: "agent.error",
+                transcript,
+                error: error.message
+              });
+            });
+        }
+      }
+
       // Forward everything back to client
       safeSend(clientWs, msg);
     });
@@ -115,14 +171,51 @@ wss.on("connection", async (clientWs) => {
     if (!upstreamWs) return;
 
     const message = data.toString();
+    let parsed = null;
 
     try {
-      const parsed = JSON.parse(message);
+      parsed = JSON.parse(message);
       if (parsed?.type) {
         console.log(`[relay] client -> upstream: ${parsed.type}`);
       }
     } catch {
       console.log("[relay] client -> upstream: non-json message");
+    }
+
+    if (parsed?.type === "response.create") {
+      return;
+    }
+
+    if (
+      parsed?.type === "conversation.item.create" &&
+      parsed?.item?.role === "user"
+    ) {
+      const textContent = parsed.item.content?.find((item) => item.type === "input_text")?.text?.trim();
+
+      if (textContent) {
+        callAgent({
+          userId,
+          message: textContent,
+          topic: "text"
+        })
+          .then((agentResult) => {
+            safeSend(clientWs, {
+              type: "agent.response",
+              transcript: textContent,
+              ...agentResult
+            });
+          })
+          .catch((error) => {
+            console.error("[agent] error:", error.message);
+            safeSend(clientWs, {
+              type: "agent.error",
+              transcript: textContent,
+              error: error.message
+            });
+          });
+      }
+
+      return;
     }
 
     // If upstream not ready yet → queue
